@@ -1,63 +1,63 @@
 import os
+import json
 import datetime
 import logging
-from fastapi import FastAPI, Request, HTTPException
-from telegram import Bot, Update
+import sqlite3
 import httpx
+from fastapi import FastAPI, Request, HTTPException
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791216614:AAFeu0p9fRps4GA1M04T0d2KMHscSMaBWQ")
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "123456789").split(",") if x.strip()]
-CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 logging.basicConfig(level=logging.INFO)
 
-import sqlite3
 _last_deletion_check = None
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+app = FastAPI()
 
 def get_db():
     return sqlite3.connect("/tmp/china_party_bot.db")
+
 def init_db():
     db = get_db()
     c = db.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        full_name TEXT,
-        social_credit INTEGER DEFAULT 100,
-        is_moderator BOOLEAN DEFAULT FALSE,
-        is_admin BOOLEAN DEFAULT FALSE,
-        last_work_time TEXT,
+        user_id INTEGER PRIMARY KEY, username TEXT, full_name TEXT,
+        social_credit INTEGER DEFAULT 100, is_moderator BOOLEAN DEFAULT FALSE,
+        is_admin BOOLEAN DEFAULT FALSE, last_work_time TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS transactions (
-        transaction_id INTEGER PRIMARY AUTOINCREMENT,
-        sender_id INTEGER,
-        receiver_id INTEGER,
-        amount INTEGER,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        transaction_id INTEGER PRIMARY AUTOINCREMENT, sender_id INTEGER,
+        receiver_id INTEGER, amount INTEGER, timestamp TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS scheduled_deletions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER NOT NULL,
-        target_username TEXT NOT NULL,
-        delete_hour INTEGER NOT NULL,
-        delete_minute INTEGER NOT NULL,
-        active BOOLEAN DEFAULT 1,
-        created_by INTEGER,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+        target_username TEXT NOT NULL, delete_hour INTEGER NOT NULL,
+        delete_minute INTEGER NOT NULL, active BOOLEAN DEFAULT 1,
+        created_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS tracked_messages (
-        message_id INTEGER,
-        chat_id INTEGER,
-        user_id INTEGER,
-        username TEXT,
-        timestamp TEXT DEFAULT CURRENT_TIMESTAMP
+        message_id INTEGER, chat_id INTEGER, user_id INTEGER,
+        username TEXT, timestamp TEXT DEFAULT CURRENT_TIMESTAMP
     )''')
     c.execute('CREATE INDEX IF NOT EXISTS idx_tracked_chat_user ON tracked_messages (chat_id, username)')
     for admin_id in ADMIN_IDS:
         c.execute("INSERT OR IGNORE INTO users (user_id, is_admin) VALUES (?, 1)", (admin_id,))
     db.commit()
     db.close()
+
+async def tg(method: str, data: dict = None):
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{TG_API}/{method}", json=data or {}, timeout=30)
+        return r.json()
+
+async def reply(chat_id: int, text: str, reply_to: int = None):
+    data = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
+    return await tg("sendMessage", data)
 
 def get_user(user_id):
     db = get_db()
@@ -84,63 +84,83 @@ def update_user(user):
     db.commit()
     db.close()
 
-bot = Bot(token=BOT_TOKEN)
-app = FastAPI()
+def get_text(msg):
+    return msg.get("text", "") or ""
+
+def get_user_id(msg):
+    u = msg.get("from", {})
+    return u.get("id")
+
+def get_username(msg):
+    u = msg.get("from", {})
+    return u.get("username", "")
+
+def get_full_name(msg):
+    u = msg.get("from", {})
+    return u.get("first_name", "") + " " + u.get("last_name", "")
+
+def get_chat_type(msg):
+    return msg.get("chat", {}).get("type", "")
+
+def get_chat_id(msg):
+    return msg.get("chat", {}).get("id")
+
+def is_group_chat(msg):
+    return get_chat_type(msg) in ("group", "supergroup")
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-def is_group_chat(update: Update):
-    return update.effective_chat and update.effective_chat.type in ('group', 'supergroup')
-
 # ========== MESSAGE TRACKING ==========
 
-async def track_message(message):
-    if not message.from_user or not message.chat:
+def track_message(msg):
+    uid = get_user_id(msg)
+    if not uid:
         return
     try:
         db = get_db()
         c = db.cursor()
         c.execute("INSERT INTO tracked_messages (message_id, chat_id, user_id, username) VALUES (?, ?, ?, ?)",
-                  (message.message_id, message.chat.id, message.from_user.id, message.from_user.username or ""))
+                  (msg["message_id"], get_chat_id(msg), uid, get_username(msg) or ""))
         db.commit()
         db.close()
     except Exception as e:
         logging.error(f"Track error: {e}")
 
-# ========== BOT COMMANDS ==========
+# ========== HANDLERS ==========
 
-async def cmd_start(message):
-    await message.reply_text(
-        "🇨🇳 Бот для удаления сообщений\n"
+async def cmd_start(chat_id, msg):
+    await reply(chat_id,
+        "Бот для удаления сообщений\n"
         "Команды (админы, в чатах):\n"
-        "/adddelete @username HH:MM - запланировать удаление\n"
-        "/deldelete @username - отменить\n"
-        "/listdelete - список расписания\n\n"
+        "/adddelete @username HH:MM\n"
+        "/deldelete @username\n"
+        "/listdelete\n\n"
         "Общие:\n"
-        "/balance - баланс\n"
-        "/work - поработать\n"
-        "/me - о себе\n"
-        "/top - топ"
+        "/balance\n"
+        "/work\n"
+        "/me\n"
+        "/top"
     )
 
-async def cmd_balance(message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
+async def cmd_balance(chat_id, msg):
+    uid = get_user_id(msg)
+    user = get_user(uid)
     if not user:
-        user = {'user_id': user_id, 'username': message.from_user.username,
-                'full_name': message.from_user.full_name, 'social_credit': 100,
-                'is_moderator': False, 'is_admin': is_admin(user_id), 'last_work_time': None}
+        user = {'user_id': uid, 'username': get_username(msg),
+                'full_name': get_full_name(msg), 'social_credit': 100,
+                'is_moderator': False, 'is_admin': is_admin(uid), 'last_work_time': None}
         update_user(user)
-    await message.reply_text(f"💰 Баланс: {user['social_credit']} кредитов")
+    await reply(chat_id, f"Баланс: {user['social_credit']} кредитов", msg["message_id"])
 
-async def cmd_work(message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
+async def cmd_work(chat_id, msg):
+    import random
+    uid = get_user_id(msg)
+    user = get_user(uid)
     if not user:
-        user = {'user_id': user_id, 'username': message.from_user.username,
-                'full_name': message.from_user.full_name, 'social_credit': 100,
-                'is_moderator': False, 'is_admin': is_admin(user_id), 'last_work_time': None}
+        user = {'user_id': uid, 'username': get_username(msg),
+                'full_name': get_full_name(msg), 'social_credit': 100,
+                'is_moderator': False, 'is_admin': is_admin(uid), 'last_work_time': None}
         update_user(user)
     now = datetime.datetime.now()
     if user['last_work_time']:
@@ -148,26 +168,24 @@ async def cmd_work(message):
         delta = (now - last).total_seconds()
         if delta < 600:
             rem = 600 - int(delta)
-            await message.reply_text(f"⏳ Подождите {rem // 60}м {rem % 60}с")
+            await reply(chat_id, f"Подождите {rem // 60}м {rem % 60}с", msg["message_id"])
             return
-    import random
     gain = random.randint(-20, 50)
     user['social_credit'] += gain
     user['last_work_time'] = now.isoformat()
     update_user(user)
-    phrases = {40: "🌟 Блестяще! +40", 20: "👍 Хорошо! +20", 0: "🙂 Нормально",
-               -10: "😕 Плохо. -10"}
-    phrase = "💢 Позор! -20"
+    phrases = {40: "Блестяще! +40", 20: "Хорошо! +20", 0: "Нормально", -10: "Плохо. -10"}
+    phrase = "Позор! -20"
     for t in sorted(phrases.keys(), reverse=True):
         if gain >= t:
             phrase = phrases[t]
             break
-    await message.reply_text(f"{phrase}\nБаланс: {user['social_credit']}")
+    await reply(chat_id, f"{phrase}\nБаланс: {user['social_credit']}", msg["message_id"])
 
-async def cmd_me(message):
-    user = get_user(message.from_user.id)
+async def cmd_me(chat_id, msg):
+    user = get_user(get_user_id(msg))
     if not user:
-        await message.reply_text("Напишите /balance для регистрации.")
+        await reply(chat_id, "Напишите /balance для регистрации.", msg["message_id"])
         return
     db = get_db()
     c = db.cursor()
@@ -176,32 +194,36 @@ async def cmd_me(message):
     c.execute("SELECT COUNT(*) FROM users")
     total = c.fetchone()[0]
     db.close()
-    await message.reply_text(
-        f"👤 {user['full_name']}\n💰 {user['social_credit']} кредитов\n"
-        f"📊 Место: {better + 1}/{total}\n"
-        f"👑 Админ: {'Да' if user['is_admin'] else 'Нет'}"
+    await reply(chat_id,
+        f"{user['full_name']}\n"
+        f"Баланс: {user['social_credit']} кредитов\n"
+        f"Место: {better + 1}/{total}\n"
+        f"Админ: {'Да' if user['is_admin'] else 'Нет'}",
+        msg["message_id"]
     )
 
-async def cmd_top(message):
+async def cmd_top(chat_id, msg):
     db = get_db()
     c = db.cursor()
     c.execute("SELECT full_name, social_credit FROM users ORDER BY social_credit DESC LIMIT 10")
     rows = c.fetchall()
     db.close()
-    text = "🏆 Топ:\n" + "\n".join(f"{i}. {n} — {s}" for i, (n, s) in enumerate(rows, 1)) if rows else "Пусто"
-    await message.reply_text(text)
+    if rows:
+        text = "Топ:\n" + "\n".join(f"{i}. {n} — {s}" for i, (n, s) in enumerate(rows, 1))
+    else:
+        text = "Пусто"
+    await reply(chat_id, text, msg["message_id"])
 
-# ========== DELETION COMMANDS ==========
-
-async def cmd_adddelete(message, args):
-    if not is_admin(message.from_user.id):
-        await message.reply_text("❌ Только для администраторов!")
+async def cmd_adddelete(chat_id, msg, args):
+    uid = get_user_id(msg)
+    if not is_admin(uid):
+        await reply(chat_id, "Только для администраторов!", msg["message_id"])
         return
-    if not is_group_chat(message):
-        await message.reply_text("❌ Только в чатах!")
+    if not is_group_chat(msg):
+        await reply(chat_id, "Только в чатах!", msg["message_id"])
         return
     if not args or len(args) < 2:
-        await message.reply_text("❌ /adddelete @username HH:MM")
+        await reply(chat_id, "/adddelete @username HH:MM", msg["message_id"])
         return
     username = args[0].lstrip('@')
     try:
@@ -209,65 +231,68 @@ async def cmd_adddelete(message, args):
         if not (0 <= hour <= 23 and 0 <= minute <= 59):
             raise ValueError
     except ValueError:
-        await message.reply_text("❌ Формат: HH:MM (например 03:00)")
+        await reply(chat_id, "Формат: HH:MM (например 03:00)", msg["message_id"])
         return
     db = get_db()
     c = db.cursor()
     c.execute("INSERT INTO scheduled_deletions (chat_id, target_username, delete_hour, delete_minute, created_by) VALUES (?, ?, ?, ?, ?)",
-              (message.chat.id, username, hour, minute, message.from_user.id))
+              (chat_id, username, hour, minute, uid))
     db.commit()
     db.close()
-    await message.reply_text(f"✅ @{username} будет удалён каждый день в {args[1]}")
+    await reply(chat_id, f"@{username} будет удалён каждый день в {args[1]}", msg["message_id"])
 
-async def cmd_deldelete(message, args):
-    if not is_admin(message.from_user.id):
-        await message.reply_text("❌ Только для администраторов!")
+async def cmd_deldelete(chat_id, msg, args):
+    uid = get_user_id(msg)
+    if not is_admin(uid):
+        await reply(chat_id, "Только для администраторов!", msg["message_id"])
         return
     if not args:
-        await message.reply_text("❌ /deldelete @username")
+        await reply(chat_id, "/deldelete @username", msg["message_id"])
         return
     username = args[0].lstrip('@')
     db = get_db()
     c = db.cursor()
-    c.execute("DELETE FROM scheduled_deletions WHERE chat_id = ? AND target_username = ?", (message.chat.id, username))
+    c.execute("DELETE FROM scheduled_deletions WHERE chat_id = ? AND target_username = ?", (chat_id, username))
     deleted = c.rowcount
     db.commit()
     db.close()
-    await message.reply_text(f"✅ Удалено для @{username}" if deleted else f"❌ Не найдено для @{username}")
+    if deleted:
+        await reply(chat_id, f"Удалено для @{username}", msg["message_id"])
+    else:
+        await reply(chat_id, f"Не найдено для @{username}", msg["message_id"])
 
-async def cmd_listdelete(message):
-    if not is_admin(message.from_user.id):
-        await message.reply_text("❌ Только для администраторов!")
+async def cmd_listdelete(chat_id, msg):
+    uid = get_user_id(msg)
+    if not is_admin(uid):
+        await reply(chat_id, "Только для администраторов!", msg["message_id"])
         return
-    if not is_group_chat(message):
-        await message.reply_text("❌ Только в чатах!")
+    if not is_group_chat(msg):
+        await reply(chat_id, "Только в чатах!", msg["message_id"])
         return
     db = get_db()
     c = db.cursor()
-    c.execute("SELECT target_username, delete_hour, delete_minute, active FROM scheduled_deletions WHERE chat_id = ?", (message.chat.id,))
+    c.execute("SELECT target_username, delete_hour, delete_minute, active FROM scheduled_deletions WHERE chat_id = ?", (chat_id,))
     rows = c.fetchall()
     db.close()
     if not rows:
-        await message.reply_text("📋 Пусто")
+        await reply(chat_id, "Пусто", msg["message_id"])
         return
-    text = "📋 Расписание:\n" + "\n".join(
-        f"{'✅' if a else '❌'} @{u} — {h:02d}:{m:02d}" for u, h, m, a in rows
+    text = "Расписание:\n" + "\n".join(
+        f"{'Вкл' if a else 'Выкл'} @{u} — {h:02d}:{m:02d}" for u, h, m, a in rows
     )
-    await message.reply_text(text)
+    await reply(chat_id, text, msg["message_id"])
 
-# ========== SCHEDULED DELETION EXECUTOR ==========
+# ========== SCHEDULED DELETION ==========
 
 async def check_and_execute_deletions():
     global _last_deletion_check
     now = datetime.datetime.utcnow()
-
-   current_minute = now.strftime("%Y-%m-%d %H:%M")
-
+    current_minute = now.strftime("%Y-%m-%d %H:%M")
     if _last_deletion_check == current_minute:
         return
     _last_deletion_check = current_minute
-
     hour, minute = now.hour, now.minute
+
     db = get_db()
     c = db.cursor()
     c.execute("SELECT id, chat_id, target_username FROM scheduled_deletions WHERE delete_hour = ? AND delete_minute = ? AND active = 1",
@@ -280,75 +305,56 @@ async def check_and_execute_deletions():
             c2.execute("SELECT message_id FROM tracked_messages WHERE chat_id = ? AND username = ? AND timestamp > datetime('now', '-48 hours')",
                        (chat_id, target_username))
             messages = c2.fetchall()
-
             if messages:
-                msg_ids = [m[0] for m in messages]
                 deleted = 0
-                for i in range(0, len(msg_ids), 100):
-                    batch = msg_ids[i:i+100]
+                for (msg_id,) in messages:
                     try:
-                        await bot.delete_messages(chat_id, batch)
-                        deleted += len(batch)
+                        await tg("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
+                        deleted += 1
                     except Exception:
-                        for mid in batch:
-                            try:
-                                await bot.delete_message(chat_id, mid)
-                                deleted += 1
-                            except Exception:
-                                pass
-
-                c3 = db.cursor()
-                c3.execute("DELETE FROM tracked_messages WHERE chat_id = ? AND username = ?", (chat_id, target_username))
-                db.commit()
-
-                try:
-                    await bot.send_message(chat_id, f"🗑️ Удалено {deleted} сообщений от @{target_username}")
-                except Exception:
-                    pass
+                        pass
+                db3 = get_db()
+                db3.execute("DELETE FROM tracked_messages WHERE chat_id = ? AND username = ?", (chat_id, target_username))
+                db3.commit()
+                db3.close()
+                if deleted > 0:
+                    await tg("sendMessage", {"chat_id": chat_id, "text": f"Удалено {deleted} сообщений от @{target_username}"})
         except Exception as e:
             logging.error(f"Deletion error @{target_username} in {chat_id}: {e}")
-
     db.close()
 
-# ========== FASTAPI ENDPOINTS ==========
+# ========== FASTAPI ==========
 
 @app.post("/api/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, bot)
 
-    if update.message:
-        await track_message(update.message)
-        await check_and_execute_deletions()
-        text = update.message.text or ""
+    if "message" in data:
+        msg = data["message"]
+        chat_id = get_chat_id(msg)
+        text = get_text(msg)
         args = text.split()[1:] if text.startswith("/") else []
 
+        track_message(msg)
+        await check_and_execute_deletions()
+
         if text.startswith("/start"):
-            await cmd_start(update.message)
+            await cmd_start(chat_id, msg)
         elif text.startswith(("/balance", "/bal")):
-            await cmd_balance(update.message)
+            await cmd_balance(chat_id, msg)
         elif text.startswith(("/work", "/w")):
-            await cmd_work(update.message)
+            await cmd_work(chat_id, msg)
         elif text.startswith("/me"):
-            await cmd_me(update.message)
+            await cmd_me(chat_id, msg)
         elif text.startswith("/top"):
-            await cmd_top(update.message)
+            await cmd_top(chat_id, msg)
         elif text.startswith("/adddelete"):
-            await cmd_adddelete(update.message, args)
+            await cmd_adddelete(chat_id, msg, args)
         elif text.startswith("/deldelete"):
-            await cmd_deldelete(update.message, args)
+            await cmd_deldelete(chat_id, msg, args)
         elif text.startswith("/listdelete"):
-            await cmd_listdelete(update.message, args)
+            await cmd_listdelete(chat_id, msg, args)
 
-    return {"ok": True}
-
-@app.get("/api/cron")
-async def cron(request: Request):
-    auth = request.headers.get("authorization", "")
-    if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
-        raise HTTPException(status_code=401)
-
-   await check_and_execute_deletions()
     return {"ok": True}
 
 @app.get("/api/health")
