@@ -5,25 +5,16 @@ from fastapi import FastAPI, Request, HTTPException
 from telegram import Bot, Update
 import httpx
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791216614:AAFeu0p9fRps4GA1M04T0d2KMHscSMaBWQ")
+ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "123456789").split(",") if x.strip()]
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
-TURSO_URL = os.environ.get("TURSO_DATABASE_URL", "")
-TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
+
 
 logging.basicConfig(level=logging.INFO)
 
-try:
-    import libsql_experimental as libsql
-    def get_db():
-        if TURSO_URL and TURSO_TOKEN:
-            return libsql.connect(TURSO_URL, auth_token=TURSO_TOKEN)
-        return libsql.connect("local.db")
-except ImportError:
-    import sqlite3 as libsql
-    def get_db():
-        return libsql.connect("local.db")
-
+import sqlite3
+def get_db():
+    return sqlite3.connect("/tmp/china_party_bot.db")
 def init_db():
     db = get_db()
     c = db.cursor()
