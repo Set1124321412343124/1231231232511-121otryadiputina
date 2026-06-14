@@ -328,6 +328,7 @@ async def check_and_execute_deletions():
 @app.post("/api/webhook")
 async def webhook(request: Request):
     data = await request.json()
+    logging.info(f"Webhook received: {json.dumps(data, ensure_ascii=False)[:500]}")
 
     if "message" in data:
         msg = data["message"]
@@ -361,7 +362,20 @@ async def webhook(request: Request):
 async def health():
     return {"status": "ok"}
 
+@app.on_event("startup")
+async def on_startup():
+    await tg("setMyCommands", {
+        "commands": json.dumps([
+            {"command": "start", "description": "Запуск бота"},
+            {"command": "balance", "description": "Ваш баланс"},
+            {"command": "work", "description": "Поработать"},
+            {"command": "me", "description": "Информация о себе"},
+            {"command": "top", "description": "Топ пользователей"},
+            {"command": "adddelete", "description": "Запланировать удаление"},
+            {"command": "deldelete", "description": "Отменить удаление"},
+            {"command": "listdelete", "description": "Список расписания"},
+        ])
+    })
+    logging.info("Bot commands registered")
+
 try:
-    init_db()
-except Exception as e:
-    logging.error(f"init_db error: {e}")
