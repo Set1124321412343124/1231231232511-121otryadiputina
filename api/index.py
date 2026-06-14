@@ -257,10 +257,17 @@ async def cmd_listdelete(message):
 
 # ========== SCHEDULED DELETION EXECUTOR ==========
 
-async def execute_scheduled_deletions():
+async def check_and_execute_deletions():
+    global _last_deletion_check
     now = datetime.datetime.utcnow()
-    hour, minute = now.hour, now.minute
 
+   current_minute = now.strftime("%Y-%m-%d %H:%M")
+
+    if _last_deletion_check == current_minute:
+        return
+    _last_deletion_check = current_minute
+
+    hour, minute = now.hour, now.minute
     db = get_db()
     c = db.cursor()
     c.execute("SELECT id, chat_id, target_username FROM scheduled_deletions WHERE delete_hour = ? AND delete_minute = ? AND active = 1",
