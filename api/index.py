@@ -9,10 +9,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791216614:AAFeu0p9fRps4GA1M04T0d2KMHsc
 ADMIN_IDS = [int(x.strip()) for x in os.environ.get("ADMIN_IDS", "123456789").split(",") if x.strip()]
 CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
-
 logging.basicConfig(level=logging.INFO)
 
 import sqlite3
+_last_deletion_check = None
+
 def get_db():
     return sqlite3.connect("/tmp/china_party_bot.db")
 def init_db():
