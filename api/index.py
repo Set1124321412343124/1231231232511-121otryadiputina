@@ -311,7 +311,7 @@ async def webhook(request: Request):
 
     if update.message:
         await track_message(update.message)
-
+        await check_and_execute_deletions()
         text = update.message.text or ""
         args = text.split()[1:] if text.startswith("/") else []
 
