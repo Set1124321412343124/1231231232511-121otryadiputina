@@ -355,4 +355,7 @@ async def cron(request: Request):
 async def health():
     return {"status": "ok"}
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    logging.error(f"init_db error: {e}")
