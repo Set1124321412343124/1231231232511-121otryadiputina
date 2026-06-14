@@ -1,4 +1,3 @@
 python-telegram-bot[job-queue]==22.6
 fastapi
 uvicorn
-libsql-experimental
