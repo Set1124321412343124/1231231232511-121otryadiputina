@@ -348,7 +348,7 @@ async def cron(request: Request):
     if CRON_SECRET and auth != f"Bearer {CRON_SECRET}":
         raise HTTPException(status_code=401)
 
-    await execute_scheduled_deletions()
+   await check_and_execute_deletions()
     return {"ok": True}
 
 @app.get("/api/health")
