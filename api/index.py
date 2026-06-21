@@ -84,12 +84,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
     return {"ok": True}
 
 
-@app.get("/setup")
+@app.get("/api/setup")
 async def setup_webhook():
     base = os.environ.get("VERCEL_URL", "")
     if not base:
@@ -105,13 +105,13 @@ async def setup_webhook():
     return {"webhook": r, "commands": r2}
 
 
-@app.get("/debug")
+@app.get("/api/debug")
 async def debug():
     info = await api("getWebhookInfo")
     return info
 
 
-@app.post("/webhook")
+@app.post("/api/webhook")
 async def webhook(request: Request):
     try:
         data = await request.json()
